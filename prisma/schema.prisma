@@ -1,0 +1,25 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Currency {
+  id     Int          @id @default(autoincrement())
+  name   String
+  symbol String       @unique
+  prices Price[]
+}
+
+model Price {
+  id         Int      @id @default(autoincrement())
+  priceSats  Float
+  dateTime   DateTime
+  currencyId Int
+  currency   Currency @relation(fields: [currencyId], references: [id])
+
+  @@unique([currencyId, dateTime])
+}
