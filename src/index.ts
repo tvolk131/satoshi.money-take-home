@@ -69,13 +69,66 @@ class CoinMarketCapApi {
 const coinMarketCap = new CoinMarketCapApi(coinMarketCapApiKey);
 const prisma = new PrismaClient();
 
+interface Currency {
+  name: string;
+  symbol: string;
+}
+
+const trackedCurrencies: Currency[] = [
+  {name: 'United States Dollar', symbol: 'USD'},
+  {name: 'Euro', symbol: 'EUR'},
+  {name: 'Ethereum', symbol: 'ETH'},
+  {name: 'Litecoin', symbol: 'LTC'},
+  {name: 'Bitcoin Cash', symbol: 'BCH'},
+  {name: 'Ripple', symbol: 'XRP'},
+  {name: 'Binance Coin', symbol: 'BNB'}
+];
+
 const main = async () => {
-  const cryptoCurrencies = await coinMarketCap.getAllCryptoCurrencies();
-  for (let i = 0; i < 10; i++) {
-    const symbol = cryptoCurrencies[i].symbol;
-    const price = await coinMarketCap.getPriceInSats(symbol);
-    console.log(`${symbol}: ${price.priceSats} sats at ${price.date}`);
+  // Create SQL entries for all tracked currencies, updating the name if it
+  // already exists.
+  for (let i = 0; i < trackedCurrencies.length; i++) {
+    const cryptoCurrency = trackedCurrencies[i];
+    await prisma.currency.upsert({
+      where: {
+        symbol: cryptoCurrency.symbol
+      },
+      create: cryptoCurrency,
+      update: {
+        name: cryptoCurrency.name
+      }
+    });
   }
+
+  // Get the price of all tracked currencies in satoshis and store them in the
+  // database.
+  for (let i = 0; i < trackedCurrencies.length; i++) {
+    const currency = trackedCurrencies[i];
+    const price = await coinMarketCap.getPriceInSats(currency.symbol);
+    await prisma.price.create({
+      data: {
+        priceSats: price.priceSats,
+        dateTime: price.date,
+        currency: {
+          connectOrCreate: {
+            where: {symbol: currency.symbol},
+            create: currency
+          }
+        }
+      }
+    });
+  }
+
+  const prices = await prisma.price.findMany({
+    where: {
+      currency: {
+        symbol: {
+          equals: 'USD'
+        }
+      }
+    }
+  });
+  console.log(prices);
 }
 
 main()
