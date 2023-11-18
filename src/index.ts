@@ -1,6 +1,7 @@
 import * as axios from 'axios';
 import {PrismaClient} from '@prisma/client';
 import dotenv from 'dotenv';
+import express, {Request, Response} from 'express';
 
 dotenv.config();
 
@@ -8,7 +9,6 @@ if (!process.env.COIN_MARKET_CAP_API_KEY) {
   console.error('No Coin Market Cap API key provided.');
   process.exit(1);
 }
-const coinMarketCapApiKey = process.env.COIN_MARKET_CAP_API_KEY;
  
 const axiosClient = axios.default.create({});
 
@@ -66,7 +66,7 @@ class CoinMarketCapApi {
   }
 }
 
-const coinMarketCap = new CoinMarketCapApi(coinMarketCapApiKey);
+const coinMarketCap = new CoinMarketCapApi(process.env.COIN_MARKET_CAP_API_KEY);
 const prisma = new PrismaClient();
 
 interface Currency {
@@ -84,7 +84,28 @@ const trackedCurrencies: Currency[] = [
   {name: 'Binance Coin', symbol: 'BNB'}
 ];
 
-const main = async () => {
+const app = express();
+const port = 3000;
+
+app.get('/priceInSats/:symbol', async (req: Request, res: Response) => {
+  const prices = await prisma.price.findMany({
+    where: {
+      currency: {
+        symbol: {
+          equals: req.params.symbol
+        }
+      }
+    }
+  });
+  
+  res.send(prices.map((price) => ({priceSats: price.priceSats, date: price.dateTime})));
+});
+
+app.listen(port, () => {
+  console.log(`Server is listening on port ${port}.`);
+});
+
+const ingestData = async () => {
   // Create SQL entries for all tracked currencies, updating the name if it
   // already exists.
   for (let i = 0; i < trackedCurrencies.length; i++) {
@@ -118,25 +139,22 @@ const main = async () => {
       }
     });
   }
+};
 
-  const prices = await prisma.price.findMany({
-    where: {
-      currency: {
-        symbol: {
-          equals: 'USD'
-        }
-      }
-    }
-  });
-  console.log(prices);
+const cleanup = async () => {
+  await prisma.$disconnect();
+  process.exit(0);
 }
 
-main()
-  .then(async () => {
-    await prisma.$disconnect();
-  })
-  .catch(async (e) => {
-    console.error(e);
-    await prisma.$disconnect();
-    process.exit(1);
-  })
+setInterval(async () => {
+  console.log('Ingesting latest price data...');
+  try {
+    await ingestData();
+    console.log('Done ingesting latest price data.');
+  } catch (err) {
+    console.error(`Failed to ingest latest price data: ${err}`);
+  }
+}, 60000);
+
+process.on('SIGINT', cleanup);
+process.on('SIGTERM', cleanup);
