@@ -98,6 +98,7 @@ const isInteger = (str: string): boolean => {
 //   startDate: The date to start querying prices from (in milliseconds since
 //              the unix epoch). This filter is performed before the limit and
 //              offset are applied.
+//   sortOrder: The order to sort the prices in. Either "asc" or "desc".
 //
 // Returns an array of objects with the following fields:
 //   priceSats: The price of the cryptocurrency in satoshis.
@@ -130,6 +131,14 @@ app.get('/priceInSats/:symbol', async (req: Request, res: Response) => {
     return res.status(400).send('Start date cannot be negative.');
   }
 
+  let sortOrder: 'asc' | 'desc' = 'asc';
+  if (req.query.sortOrder) {
+    if (req.query.sortOrder !== 'asc' && req.query.sortOrder !== 'desc') {
+      return res.status(400).send('Sort order must be either "asc" or "desc".');
+    }
+    sortOrder = req.query.sortOrder;
+  }
+
   const prices = await prisma.price.findMany({
     where: {
       currency: {
@@ -140,6 +149,9 @@ app.get('/priceInSats/:symbol', async (req: Request, res: Response) => {
       dateTime: {
         gt: startDate ? new Date(startDate) : undefined
       }
+    },
+    orderBy: {
+      dateTime: sortOrder
     },
     take: limit,
     skip: offset
