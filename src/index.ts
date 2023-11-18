@@ -87,18 +87,68 @@ const trackedCurrencies: Currency[] = [
 const app = express();
 const port = 3000;
 
+const isInteger = (str: string): boolean => {
+  return !isNaN(parseInt(str)) && Number.isInteger(parseFloat(str));
+};
+
+// Get the price of a cryptocurrency in satoshis.
+// Query parameters:
+//   limit: The maximum number of price points to return.
+//   offset: The number of prices to skip.
+//   startDate: The date to start querying prices from (in milliseconds since
+//              the unix epoch). This filter is performed before the limit and
+//              offset are applied.
+//
+// Returns an array of objects with the following fields:
+//   priceSats: The price of the cryptocurrency in satoshis.
+//   date: The date of the price.
 app.get('/priceInSats/:symbol', async (req: Request, res: Response) => {
+  if (req.query.limit  && !isInteger(req.query.limit as string)) {
+    return res.status(400).send('Limit must be an integer.');
+  }
+  // Default to 10 if not provided.
+  const limit = parseInt(req.query.limit as string, 10) || 10;
+  if (limit < 0) {
+    return res.status(400).send('Limit cannot be negative.');
+  }
+
+  if (req.query.offset && !isInteger(req.query.offset as string)) {
+    return res.status(400).send('Offset must be an integer.');
+  }
+  // Default to 0 if not provided.
+  const offset = parseInt(req.query.offset as string, 10) || 0;
+  if (offset < 0) {
+    return res.status(400).send('Offset cannot be negative.');
+  }
+
+  if (req.query.startDate && !isInteger(req.query.startDate as string)) {
+    return res.status(400).send('Start date must be an integer (representing ' +
+                                'milliseconds since the unix epoch).');
+  }
+  let startDate = parseInt(req.query.startDate as string, 10) || undefined;
+  if (startDate && startDate < 0) {
+    return res.status(400).send('Start date cannot be negative.');
+  }
+
   const prices = await prisma.price.findMany({
     where: {
       currency: {
         symbol: {
           equals: req.params.symbol
         }
+      },
+      dateTime: {
+        gt: startDate ? new Date(startDate) : undefined
       }
-    }
+    },
+    take: limit,
+    skip: offset
   });
-  
-  res.send(prices.map((price) => ({priceSats: price.priceSats, date: price.dateTime})));
+
+  res.send(prices.map((price) => ({
+    priceSats: price.priceSats,
+    date: price.dateTime
+  })));
 });
 
 app.listen(port, () => {
