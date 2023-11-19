@@ -2,6 +2,7 @@ import * as axios from 'axios';
 import {PrismaClient} from '@prisma/client';
 import dotenv from 'dotenv';
 import express, {Request, Response} from 'express';
+import {computeDirectExchangeRate} from './priceConversion';
 
 dotenv.config();
 
@@ -91,12 +92,12 @@ const isInteger = (str: string): boolean => {
   return !isNaN(parseInt(str)) && Number.isInteger(parseFloat(str));
 };
 
-interface BtcPricePoint {
+export interface BtcPricePoint {
   priceSats: number;
   date: Date;
 }
 
-interface PricePoint {
+export interface PricePoint {
   price: number;
   date: Date;
 }
@@ -173,56 +174,6 @@ app.get('/priceInSats/:symbol', async (req: Request, res: Response<BtcPricePoint
     date: price.dateTime
   })));
 });
-
-const interpolatePrice = (data: BtcPricePoint[], targetTime: Date): number | null => {
-  // Check for an exact match.
-  const exactMatch = data.find(d => d.date.getTime() === targetTime.getTime());
-  if (exactMatch) {
-    return exactMatch.priceSats;
-  }
-
-  const closestBefore = data.filter(d => d.date < targetTime).pop();
-  const closestAfter = data.find(d => d.date > targetTime);
-
-  if (!closestBefore || !closestAfter) {
-    return closestBefore ? closestBefore.priceSats : closestAfter ? closestAfter.priceSats : null;
-  }
-
-  const timeDiff = closestAfter.date.getTime() - closestBefore.date.getTime();
-  const priceDiff = closestAfter.priceSats - closestBefore.priceSats;
-
-  const timeFraction = (targetTime.getTime() - closestBefore.date.getTime()) / timeDiff;
-
-  return closestBefore.priceSats + timeFraction * priceDiff;
-};
-
-
-const getAllDates = (currency1: BtcPricePoint[], currency2: BtcPricePoint[]): Date[] => {
-  const dateSet = new Set<number>();
-  currency1.concat(currency2).forEach(item => dateSet.add(item.date.getTime()));
-  return Array.from(dateSet).sort().map(time => new Date(time));
-};
-
-const computeDirectExchangeRate = (currency1: BtcPricePoint[], currency2: BtcPricePoint[]): PricePoint[] => {
-  const allDates = getAllDates(currency1, currency2);
-  let results: (PricePoint | null)[] = [];
-
-  for (let date of allDates) {
-      const interpolatedPrice1 = interpolatePrice(currency1, date);
-      const interpolatedPrice2 = interpolatePrice(currency2, date);
-
-      if (interpolatedPrice1 === null || interpolatedPrice2 === null) {
-          results.push(null);
-      } else {
-          results.push({
-              price: interpolatedPrice1 / interpolatedPrice2,
-              date: date
-          });
-      }
-  }
-
-  return results.filter(r => r !== null) as PricePoint[];
-};
 
 // Get the price of a currency in another currency. Note that this does not yet
 // support using Bitcoin (BTC) as the base currency or the priced currency.
