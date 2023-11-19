@@ -14,3 +14,9 @@ The first option is quicker and easier to implement, but has a few issues:
 3. Rigidity - If we have the price of currency A <-> currency B and currency B <-> currency C, we can calculate the price of currency A <-> currency C. But without any base currency, finding which currencies to hop through will be difficult, likely requiring a pathfinding algorithm to search through all of the currencies that we're storing.
 
 For these reasons, it makes more sense to store all prices relative to a single base currency. This eliminates any chance of storing duplicate data. since we're not directly storing price data of the base currency. It eliminates any self-inconsistency of data since there's always exactly one way to calculate the price of one currency compared to any other currency. It solves the problem of rigidity as well, for the same reason. We'll use Bitcoin as our base currency since our business is built around Bitcoin and, while the US Dollar, Euro, or other currencies may fall away, if Bitcoin dies then our company and hence this service is rendered useless.
+
+## Running the app
+
+Install dependencies by running `npm i`.
+Provide a CoinMarketCap API key and set it to the environment variable `COIN_MARKET_CAP_API_KEY`.
+Run `npm start`.
