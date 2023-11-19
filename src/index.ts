@@ -91,7 +91,18 @@ const isInteger = (str: string): boolean => {
   return !isNaN(parseInt(str)) && Number.isInteger(parseFloat(str));
 };
 
-// Get the price of a cryptocurrency in satoshis.
+interface BtcPricePoint {
+  priceSats: number;
+  date: Date;
+}
+
+interface PricePoint {
+  price: number;
+  date: Date;
+}
+
+// Get the price of a currency in satoshis.
+//
 // Query parameters:
 //   limit: The maximum number of price points to return.
 //   offset: The number of prices to skip.
@@ -103,7 +114,7 @@ const isInteger = (str: string): boolean => {
 // Returns an array of objects with the following fields:
 //   priceSats: The price of the cryptocurrency in satoshis.
 //   date: The date of the price.
-app.get('/priceInSats/:symbol', async (req: Request, res: Response) => {
+app.get('/priceInSats/:symbol', async (req: Request, res: Response<BtcPricePoint[] | string>) => {
   if (req.query.limit  && !isInteger(req.query.limit as string)) {
     return res.status(400).send('Limit must be an integer.');
   }
@@ -161,6 +172,157 @@ app.get('/priceInSats/:symbol', async (req: Request, res: Response) => {
     priceSats: price.priceSats,
     date: price.dateTime
   })));
+});
+
+const interpolatePrice = (data: BtcPricePoint[], targetTime: Date): number | null => {
+  // Check for an exact match.
+  const exactMatch = data.find(d => d.date.getTime() === targetTime.getTime());
+  if (exactMatch) {
+    return exactMatch.priceSats;
+  }
+
+  const closestBefore = data.filter(d => d.date < targetTime).pop();
+  const closestAfter = data.find(d => d.date > targetTime);
+
+  if (!closestBefore || !closestAfter) {
+    return closestBefore ? closestBefore.priceSats : closestAfter ? closestAfter.priceSats : null;
+  }
+
+  const timeDiff = closestAfter.date.getTime() - closestBefore.date.getTime();
+  const priceDiff = closestAfter.priceSats - closestBefore.priceSats;
+
+  const timeFraction = (targetTime.getTime() - closestBefore.date.getTime()) / timeDiff;
+
+  return closestBefore.priceSats + timeFraction * priceDiff;
+};
+
+
+const getAllDates = (currency1: BtcPricePoint[], currency2: BtcPricePoint[]): Date[] => {
+  const dateSet = new Set<number>();
+  currency1.concat(currency2).forEach(item => dateSet.add(item.date.getTime()));
+  return Array.from(dateSet).sort().map(time => new Date(time));
+};
+
+const computeDirectExchangeRate = (currency1: BtcPricePoint[], currency2: BtcPricePoint[]): PricePoint[] => {
+  const allDates = getAllDates(currency1, currency2);
+  let results: (PricePoint | null)[] = [];
+
+  for (let date of allDates) {
+      const interpolatedPrice1 = interpolatePrice(currency1, date);
+      const interpolatedPrice2 = interpolatePrice(currency2, date);
+
+      if (interpolatedPrice1 === null || interpolatedPrice2 === null) {
+          results.push(null);
+      } else {
+          results.push({
+              price: interpolatedPrice1 / interpolatedPrice2,
+              date: date
+          });
+      }
+  }
+
+  return results.filter(r => r !== null) as PricePoint[];
+};
+
+// Get the price of a currency in another currency. Note that this does not yet
+// support using Bitcoin (BTC) as the base currency or the priced currency.
+// Please use the /priceInSats endpoint for that.
+//
+// Query parameters:
+//   limit: The maximum number of price points to return.
+//   offset: The number of prices to skip.
+//   startDate: The date to start querying prices from (in milliseconds since
+//              the unix epoch). This filter is performed before the limit and
+//              offset are applied.
+//   sortOrder: The order to sort the prices in. Either "asc" or "desc".
+//
+// Returns an array of objects with the following fields:
+//   price: The price of the the priced currency measured in units of the base
+//          currency.
+//   date: The date of the price.
+app.get('/price/:baseSymbol/:pricedSymbol', async (req: Request, res: Response<PricePoint[] | string>) => {
+  if (req.query.limit  && !isInteger(req.query.limit as string)) {
+    return res.status(400).send('Limit must be an integer.');
+  }
+  // Default to 10 if not provided.
+  const limit = parseInt(req.query.limit as string, 10) || 10;
+  if (limit < 0) {
+    return res.status(400).send('Limit cannot be negative.');
+  }
+
+  if (req.query.offset && !isInteger(req.query.offset as string)) {
+    return res.status(400).send('Offset must be an integer.');
+  }
+  // Default to 0 if not provided.
+  const offset = parseInt(req.query.offset as string, 10) || 0;
+  if (offset < 0) {
+    return res.status(400).send('Offset cannot be negative.');
+  }
+
+  if (req.query.startDate && !isInteger(req.query.startDate as string)) {
+    return res.status(400).send('Start date must be an integer (representing ' +
+                                'milliseconds since the unix epoch).');
+  }
+  let startDate = parseInt(req.query.startDate as string, 10) || undefined;
+  if (startDate && startDate < 0) {
+    return res.status(400).send('Start date cannot be negative.');
+  }
+
+  let sortOrder: 'asc' | 'desc' = 'asc';
+  if (req.query.sortOrder) {
+    if (req.query.sortOrder !== 'asc' && req.query.sortOrder !== 'desc') {
+      return res.status(400).send('Sort order must be either "asc" or "desc".');
+    }
+    sortOrder = req.query.sortOrder;
+  }
+
+  const baseCurrencyPrices = await prisma.price.findMany({
+    where: {
+      currency: {
+        symbol: {
+          equals: req.params.baseSymbol
+        }
+      },
+      dateTime: {
+        gt: startDate ? new Date(startDate) : undefined
+      }
+    },
+    orderBy: {
+      dateTime: sortOrder
+    },
+    take: limit,
+    skip: offset
+  });
+
+  const pricedCurrencyPrices = await prisma.price.findMany({
+    where: {
+      currency: {
+        symbol: {
+          equals: req.params.pricedSymbol
+        }
+      },
+      dateTime: {
+        gt: startDate ? new Date(startDate) : undefined
+      }
+    },
+    orderBy: {
+      dateTime: sortOrder
+    },
+    take: limit,
+    skip: offset
+  });;
+
+  res.send(
+    computeDirectExchangeRate(
+      pricedCurrencyPrices.map((point) => ({
+        priceSats: point.priceSats,
+        date: point.dateTime
+      })),
+      baseCurrencyPrices.map((point) => ({
+        priceSats: point.priceSats,
+        date: point.dateTime
+      })))
+  );
 });
 
 app.listen(port, () => {
