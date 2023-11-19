@@ -85,6 +85,75 @@ const trackedCurrencies: Currency[] = [
   {name: 'Binance Coin', symbol: 'BNB'}
 ];
 
+class Cache {
+  // The time-to-live of the cache in milliseconds. Any data older than this
+  // will be removed from the cache.
+  readonly ttlMillis = 24 * 60 * 60 * 1000;
+
+  // Cached price data by currency symbol. Prices are stored in ascending order
+  // by date.
+  private cache: Map<string, BtcPricePoint[]> = new Map<string, BtcPricePoint[]>();
+
+  // Add a price point to the cache. If the price point is already in the cache
+  // or doesn't belong in it, it will not be added.
+  addPricePoint(symbol: string, price: BtcPricePoint): void {
+    // If price point is already older than the time-to-live, don't add it.
+    const now = new Date();
+    if (now.getTime() - price.date.getTime() > this.ttlMillis) {
+      return;
+    }
+
+    // If the symbol is not already in the cache, add it.
+    if (!this.cache.has(symbol)) {
+      this.cache.set(symbol, [price]);
+      return;
+    } else {
+      const prices = this.cache.get(symbol);
+      if (!prices) {
+        // This should never happen.
+        return;
+      }
+
+      // If the price point is already in the cache, don't add it.
+      if (prices.find(p => p.date.getTime() === price.date.getTime())) {
+        return;
+      }
+
+      // Otherwise, add it to the cache in ascending order by date.
+      let i = 0;
+      for (; i < prices.length; i++) {
+        if (prices[i].date.getTime() > price.date.getTime()) {
+          break;
+        }
+      }
+      // Insert the price point at the correct index. We're doing this outside
+      // so that we add the price point to the end of the array if it's the
+      // newest price point.
+      prices.splice(i, 0, price);
+    }
+  }
+
+  get(symbol: string): BtcPricePoint[] | undefined {
+    return this.cache.get(symbol);
+  }
+
+  // Remove all data older than the time-to-live. This should be called
+  // periodically to remove outdated data.
+  cleanup(): void {
+    const now = new Date();
+    this.cache.forEach((prices, symbol) => {
+      const filteredPrices = prices.filter(price => now.getTime() - price.date.getTime() <= this.ttlMillis);
+      if (filteredPrices.length > 0) {
+        this.cache.set(symbol, filteredPrices);
+      } else {
+        this.cache.delete(symbol);
+      }
+    });
+  }
+}
+
+const cache = new Cache();
+
 const app = express();
 const port = 3000;
 
@@ -149,6 +218,22 @@ app.get('/priceInSats/:symbol', async (req: Request, res: Response<BtcPricePoint
       return res.status(400).send('Sort order must be either "asc" or "desc".');
     }
     sortOrder = req.query.sortOrder;
+  }
+
+  const cachedResults = cache.get(req.params.symbol);
+
+  // If the cache contains data newer than the start date, we can just return
+  // the cached data.
+  if (startDate &&
+      cachedResults &&
+      cachedResults[0].date.getTime() > startDate) {
+    // The Typescript type checker doesn't know whether the `.filter()` will
+    // keep running after this `if` statement, so we need to copy the start date
+    // into a new variable to make the type checker happy.
+    const peggedStartDate = startDate;
+
+    console.log('Using cached results.');
+    return res.send(cachedResults.filter(price => price.date.getTime() > peggedStartDate));
   }
 
   const prices = await prisma.price.findMany({
@@ -227,56 +312,117 @@ app.get('/price/:baseSymbol/:pricedSymbol', async (req: Request, res: Response<P
     sortOrder = req.query.sortOrder;
   }
 
-  const baseCurrencyPrices = await prisma.price.findMany({
-    where: {
-      currency: {
-        symbol: {
-          equals: req.params.baseSymbol
+  const cachedBaseCurrencyResults = cache.get(req.params.baseSymbol);
+  const cachedPricedCurrencyResults = cache.get(req.params.pricedSymbol);
+
+  let baseCurrencyPrices: BtcPricePoint[] | undefined = undefined;
+  let pricedCurrencyPrices: BtcPricePoint[] | undefined = undefined;
+
+  // If the cache contains data newer than the start date, we can just return
+  // the cached data.
+  if (startDate &&
+      cachedBaseCurrencyResults &&
+      cachedBaseCurrencyResults[0].date.getTime() > startDate) {
+    // The Typescript type checker doesn't know whether the `.filter()` will
+    // keep running after this `if` statement, so we need to copy the start date
+    // into a new variable to make the type checker happy.
+    const peggedStartDate = startDate;
+
+    console.log('Using cached results.');
+    baseCurrencyPrices = cachedBaseCurrencyResults.filter(
+      price => price.date.getTime() > peggedStartDate);
+  }
+
+  // If the cache contains data newer than the start date, we can just return
+  // the cached data.
+  if (startDate &&
+    cachedPricedCurrencyResults &&
+    cachedPricedCurrencyResults[0].date.getTime() > startDate) {
+    // The Typescript type checker doesn't know whether the `.filter()` will
+    // keep running after this `if` statement, so we need to copy the start date
+    // into a new variable to make the type checker happy.
+    const peggedStartDate = startDate;
+
+    console.log('Using cached results.');
+    pricedCurrencyPrices = cachedPricedCurrencyResults.filter(
+      price => price.date.getTime() > peggedStartDate);
+  }
+
+  if (baseCurrencyPrices === undefined) {
+    baseCurrencyPrices = (await prisma.price.findMany({
+      where: {
+        currency: {
+          symbol: {
+            equals: req.params.baseSymbol
+          }
+        },
+        dateTime: {
+          gt: startDate ? new Date(startDate) : undefined
         }
       },
-      dateTime: {
-        gt: startDate ? new Date(startDate) : undefined
-      }
-    },
-    orderBy: {
-      dateTime: sortOrder
-    },
-    take: limit,
-    skip: offset
-  });
+      orderBy: {
+        dateTime: sortOrder
+      },
+      take: limit,
+      skip: offset
+    })).map((point) => ({
+      priceSats: point.priceSats,
+      date: point.dateTime
+    }));
+  }
 
-  const pricedCurrencyPrices = await prisma.price.findMany({
-    where: {
-      currency: {
-        symbol: {
-          equals: req.params.pricedSymbol
+  if (pricedCurrencyPrices === undefined) {
+    pricedCurrencyPrices = (await prisma.price.findMany({
+      where: {
+        currency: {
+          symbol: {
+            equals: req.params.pricedSymbol
+          }
+        },
+        dateTime: {
+          gt: startDate ? new Date(startDate) : undefined
         }
       },
-      dateTime: {
-        gt: startDate ? new Date(startDate) : undefined
-      }
-    },
-    orderBy: {
-      dateTime: sortOrder
-    },
-    take: limit,
-    skip: offset
-  });;
+      orderBy: {
+        dateTime: sortOrder
+      },
+      take: limit,
+      skip: offset
+    })).map((point) => ({
+      priceSats: point.priceSats,
+      date: point.dateTime
+    }));
+  }
 
-  res.send(
-    computeDirectExchangeRate(
-      pricedCurrencyPrices.map((point) => ({
-        priceSats: point.priceSats,
-        date: point.dateTime
-      })),
-      baseCurrencyPrices.map((point) => ({
-        priceSats: point.priceSats,
-        date: point.dateTime
-      })))
-  );
+  res.send(computeDirectExchangeRate(pricedCurrencyPrices, baseCurrencyPrices));
 });
 
-app.listen(port, () => {
+app.listen(port, async () => {
+  // Seed the cache with the latest price data of all tracked currencies from
+  // our DB.
+  console.log('Seeding cache...');
+  for (let i = 0; i < trackedCurrencies.length; i++) {
+    const currency = trackedCurrencies[i];
+    const prices = await prisma.price.findMany({
+      where: {
+        currency: {
+          symbol: {
+            equals: currency.symbol
+          }
+        },
+        dateTime: {
+          gt: new Date(Date.now() - cache.ttlMillis)
+        }
+      }
+    });
+    prices.forEach(price => {
+      cache.addPricePoint(currency.symbol, {
+        priceSats: price.priceSats,
+        date: price.dateTime
+      });
+    });
+  }
+  console.log('Done seeding cache.');
   console.log(`Server is listening on port ${port}.`);
 });
 
@@ -301,6 +447,7 @@ const ingestData = async () => {
   for (let i = 0; i < trackedCurrencies.length; i++) {
     const currency = trackedCurrencies[i];
     const price = await coinMarketCap.getPriceInSats(currency.symbol);
+    cache.addPricePoint(currency.symbol, price);
     await prisma.price.create({
       data: {
         priceSats: price.priceSats,
@@ -322,6 +469,10 @@ const cleanup = async () => {
 }
 
 setInterval(async () => {
+  console.log('Cleaning up cache...');
+  cache.cleanup();
+  console.log('Done cleaning up cache.');
+
   console.log('Ingesting latest price data...');
   try {
     await ingestData();
